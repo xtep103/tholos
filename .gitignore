@@ -6,3 +6,7 @@
 contracts/tholos/test_snapshots/test/proptest_vote_counting/
 contracts/tholos/test_snapshots/test/proptest_initialize_bounds/
 contracts/tholos-v2/test_snapshots/test/proptest_settlement/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
