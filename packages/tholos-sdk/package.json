@@ -10,7 +10,10 @@
   },
   "private": true,
   "type": "module",
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -19,7 +22,7 @@
   },
   "typings": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc"
+    "build": "node init && tsc"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.2.0",
