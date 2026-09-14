@@ -558,7 +558,9 @@ pub enum Error {
     /// separately from this issue's third-party registration path).
     CannotRegisterAsFixedParty = 16,
     InvalidPositionAmount = 17,
-    /// A new position's amount was below `policy.min_resolution_bond`.
+    /// A `register` deposit, first-time or a top-up, was below the
+    /// effective minimum: `policy.min_resolution_bond`, or the position's
+    /// remaining headroom under `policy.max_position` if that's smaller.
     BelowMinimumResolutionBond = 18,
     /// A position's total (after aggregating this deposit) exceeded
     /// `policy.max_position`.
@@ -616,6 +618,11 @@ pub enum Error {
     /// Rejected outright rather than treated as a no-op, so this call can
     /// never be read as altering an already-decided result.
     RoundAlreadyDecided = 36,
+    /// `initialize` was called with `max_total_weight` greater than
+    /// `MAX_TOTAL_WEIGHT_TO_POSITION_RATIO * max_position`. This caps how
+    /// many effective seats a single split actor can occupy, raising the
+    /// cost of Sybil-style address splitting.
+    InvalidWeightRatio = 37,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280;
@@ -678,6 +685,16 @@ const MAX_BOND_AMOUNT: i128 = i128::MAX / (MAX_FINALIZE_REWARD_BPS as i128);
 /// headroom under the true `sqrt(i128::MAX)` limit while still supporting
 /// any deployment token's full realistic supply range.
 const MAX_SETTLEMENT_TOTAL_WEIGHT: i128 = 10_000_000_000_000_000_000;
+
+/// Maximum allowed ratio between `max_total_weight` and `max_position`.
+///
+/// A bounded ratio raises the cost of Sybil-style splitting: a single actor
+/// must control at least this many distinct positions to approach the
+/// plutocratic threshold. Even with this bound, a coalition controlling more
+/// than half of the eligible bonded capital can still determine the result;
+/// the ratio only bounds how cheaply one actor can approach that via address
+/// splitting. See `docs/src/CONTRACT_V2.md` and issue #168.
+const MAX_TOTAL_WEIGHT_TO_POSITION_RATIO: i128 = 10;
 
 /// This proposal has exactly one weighted round: no recursive appeals or
 /// repeated stake rounds, per V2_RESOLUTION.md's "Lifecycle and the single
@@ -790,6 +807,14 @@ impl TholosV2 {
         // A position can't usefully exceed the frozen total it's part of.
         if max_position <= 0 || max_position > max_total_weight {
             return Err(Error::InvalidMaxPosition);
+        }
+
+        // Issue #168: bound the Sybil-splitting surface by requiring
+        // max_total_weight be no more than a fixed multiple of max_position.
+        // Since max_position <= max_total_weight <= MAX_SETTLEMENT_TOTAL_WEIGHT (10^19),
+        // max_position * MAX_TOTAL_WEIGHT_TO_POSITION_RATIO cannot overflow i128.
+        if max_total_weight > max_position * MAX_TOTAL_WEIGHT_TO_POSITION_RATIO {
+            return Err(Error::InvalidWeightRatio);
         }
 
         let policy = PolicySnapshotV2 {
@@ -1270,13 +1295,16 @@ impl TholosV2 {
     /// already have fixed positions from `dispute`; a way for them to top up
     /// those positions is tracked separately from this issue.
     ///
-    /// A first-time deposit must be at least `policy.min_resolution_bond`.
-    /// A top-up (same voter, same assertion) aggregates into the existing
-    /// position and must reuse its original `commitment`, a position's
-    /// committed side can never change after funding. Rejects atomically,
-    /// with no position or weight created, if the resulting position size or
-    /// eligible total would exceed `policy.max_position` /
-    /// `policy.max_total_weight`.
+    /// Every deposit, first-time or a top-up, must be at least
+    /// `policy.min_resolution_bond`, or the position's remaining headroom
+    /// under `policy.max_position` if that's smaller (so a voter close to
+    /// the cap can still top off the last of it rather than being unable to
+    /// deposit any valid amount). A top-up (same voter, same assertion)
+    /// aggregates into the existing position and must reuse its original
+    /// `commitment`, a position's committed side can never change after
+    /// funding. Rejects atomically, with no position or weight created, if
+    /// the resulting position size or eligible total would exceed
+    /// `policy.max_position` / `policy.max_total_weight`.
     ///
     /// A qualifying deposit (one landing within `anti_snipe_extension_secs`
     /// of the current deadline) pushes the registration deadline out by
@@ -1328,17 +1356,6 @@ impl TholosV2 {
         if now > resolution.registration_deadline {
             return Err(Error::RegistrationClosed);
         }
-        // Anti-sniping: a deposit landing within the last extension-window
-        // of the current deadline pushes it out, capped at the hard
-        // deadline fixed at dispute() time.
-        if now
-            >= resolution
-                .registration_deadline
-                .saturating_sub(assertion.policy.anti_snipe_extension_secs)
-        {
-            let extended = now + assertion.policy.anti_snipe_extension_secs;
-            resolution.registration_deadline = extended.min(resolution.registration_hard_deadline);
-        }
 
         let position_key = DataKey::Position(id, voter.clone());
         let existing: Option<Position> = env.storage().persistent().get(&position_key);
@@ -1352,13 +1369,38 @@ impl TholosV2 {
                 }
                 position.amount
             }
-            None => {
-                if amount < assertion.policy.min_resolution_bond {
-                    return Err(Error::BelowMinimumResolutionBond);
-                }
-                0
-            }
+            None => 0,
         };
+
+        // Applies to every deposit, not just a brand-new position: a top-up
+        // below this floor would otherwise still qualify for the anti-snipe
+        // extension below, letting a single address re-trigger it
+        // arbitrarily many times with dust-sized deposits (#155). Floored
+        // at the position's remaining headroom under max_position, not just
+        // min_resolution_bond, so a voter close to the cap can still top off
+        // the last of it instead of being stranded between "too small to
+        // clear the minimum" and "too large to fit under the cap."
+        let effective_minimum = assertion.policy.min_resolution_bond.min(
+            assertion
+                .policy
+                .max_position
+                .saturating_sub(previous_amount),
+        );
+        if amount < effective_minimum {
+            return Err(Error::BelowMinimumResolutionBond);
+        }
+
+        // Anti-sniping: a deposit landing within the last extension-window
+        // of the current deadline pushes it out, capped at the hard
+        // deadline fixed at dispute() time.
+        if now
+            >= resolution
+                .registration_deadline
+                .saturating_sub(assertion.policy.anti_snipe_extension_secs)
+        {
+            let extended = now + assertion.policy.anti_snipe_extension_secs;
+            resolution.registration_deadline = extended.min(resolution.registration_hard_deadline);
+        }
 
         let new_amount = previous_amount
             .checked_add(amount)
