@@ -31,7 +31,7 @@ State of an assertion: `Pending`, `Disputed`, or `Resolved`.
 | `asserter` | `Address` | Who posted the claim |
 | `outcome` | `bool` | The claimed outcome |
 | `final_outcome` | `Option<bool>` | The authoritative resolved outcome; `None` until the assertion reaches `Resolved` |
-| `bond` | `i128` | Bond amount posted (in the configured token), pinned at the moment `assert_outcome` created the assertion; a later `set_bond_amount` call never changes it retroactively |
+| `bond` | `i128` | Bond amount (in the configured token) as actually received by the contract, measured by balance delta across the transfer, so a fee-on-transfer token records less than the nominal amount. Pinned at the moment `assert_outcome` created the assertion; a later `set_bond_amount` call never changes it retroactively |
 | `opened_at` | `u64` | Ledger timestamp the assertion was posted |
 | `status` | `Status` | Current state |
 | `disputer` | `Option<Address>` | Who disputed it, if disputed |
@@ -67,6 +67,10 @@ State of an assertion: `Pending`, `Disputed`, or `Resolved`.
 | `NotProposer` | Caller isn't the proposer and the proposal can still reach a majority, so can't cancel it |
 | `NoAdminRotationProposal` | `accept_admin` called without a pending admin proposal |
 | `SelfVote` | Resolver is also the assertion's asserter or disputer |
+| `SelfDispute` | The disputer is the same address as the asserter |
+| `StallTimeoutNotConfigured` | `reclaim_stalled_dispute` was called with no stall timeout configured (or on a pre-upgrade dispute with no `DisputedAt` entry) |
+| `DisputeNotStalled` | `reclaim_stalled_dispute` was called before the stall timeout elapsed since the dispute opened |
+| `TokenTransferMismatch` | An incoming token transfer didn't increase the contract's balance (non-positive or overflowing received amount), or an escrow/balance arithmetic overflow |
 
 ## Functions
 
